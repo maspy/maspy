@@ -1,0 +1,2 @@
+# maspy
+Münster Array Seismology
