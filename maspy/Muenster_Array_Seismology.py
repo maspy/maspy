@@ -32,6 +32,10 @@ from matplotlib.pyplot import figure
 import shutil
 import re
 
+import sipy
+from sipy.util.array_util import alignon
+from sipy.util.fkutil import plot
+
 KM_PER_DEG = 111.1949
 os.system('clear')  # clear screen
 model = TauPyModel(model="ak135")
@@ -352,7 +356,7 @@ def vespagram(stream, ev, inv, method,isinv,isev, scale, nthroot=4, static3D=Fal
     # arguments to compute the vespagram
     kwargs = dict(
         # slowness grid: X min, X max, Y min, Y max, Slow Step
-        sll=sll, slm=slm, sls=sls, baz=baz, stime=starttime, etime=endtime, source_depth=ev_depth,
+        ev=ev,inv=inv,sll=sll, slm=slm, sls=sls, baz=baz, stime=starttime, etime=endtime, source_depth=ev_depth,
         distance=great_circle_dist, static_correction=static_correction, phase=phase, method=method,
         nthroot=nthroot, correct_3dplane=False, static_3D=static3D, vel_cor=vel_corr)
     
@@ -458,7 +462,7 @@ def vespagram(stream, ev, inv, method,isinv,isev, scale, nthroot=4, static3D=Fal
     ax1.set_title('VESPAGRAM',size=24)
 
     # save the figure
-    save_fig = False
+    #save_fig = False
     if save_fig:
         print 'I am printing the figure in a file!'
         file_name = 'vespagram_' + component + '.png'
@@ -471,8 +475,8 @@ def vespagram(stream, ev, inv, method,isinv,isev, scale, nthroot=4, static3D=Fal
     return slow, beams, max_beam, beam_max
 
 # Change the name of the function
-def vespagram_baz(stream, sll, slm, sls, baz, stime, etime, source_depth, distance, static_correction,
-        phase, verbose=False, coordsys='lonlat', timestamp='mlabday', method="DLS", nthroot=1,
+def vespagram_baz(stream, ev, inv, sll, slm, sls, baz, stime, etime, source_depth, distance, static_correction,
+        phase,verbose=False, coordsys='lonlat', timestamp='mlabday', method="DLS", nthroot=1,
         store=None, correct_3dplane=False, static_3D=False, vel_cor=4.):
 
     """
@@ -554,7 +558,36 @@ def vespagram_baz(stream, sll, slm, sls, baz, stime, etime, source_depth, distan
     time_shift_table = get_timeshift_baz(geometry, sll, slm, sls, baz, source_depth,
          distance, phase, vel_cor=vel_cor, static_3D=static_3D, model=model, static_correction=static_correction)
 
-    # calculate the overlaping lenght of the traces
+
+    # Do static correction by backshifting aligned traces
+    if static_correction:
+        print "Epicentral distance is ", distance
+        stream = alignon(stream, ev, phase=['PP'], xcorr=True, maxtimewindow=[15,15])
+        # plot(stream, inv, ev, markphases=['Pdiff','PcP','PP'])
+
+        arrivals = model.get_pierce_points(source_depth, distance, phase_list=phase)
+        slow = arrivals[0].ray_param_sec_degree
+        slow /= KM_PER_DEG
+        baze = math.pi * baz / 180.
+        print "slow and baze are ", slow, baze
+
+        time_shift_table_static = slow * (geometry[:,0] * math.sin(baze) + geometry[:,1] * math.cos(baze))
+        print time_shift_table_static
+        
+        for k in xrange(nbeams):
+            #print time_shift_table
+            #print
+            #print time_shift_table_static
+            #print
+            time_shift_table[:,k] += time_shift_table_static[:]
+            #print
+            #print time_shift_table
+
+            stime = max([tr.stats.starttime for tr in stream])
+            etime = min([tr.stats.endtime for tr in stream])
+            fs = stream[0].stats.sampling_rate
+    
+    print(stream)
     mini = np.min(time_shift_table[:,:])
     maxi = np.max(time_shift_table[:,:])
     # print("mini")
@@ -585,6 +618,8 @@ def vespagram_baz(stream, sll, slm, sls, baz, stime, etime, source_depth, distan
     efective_trace_lenght = biggest_right - biggest_left 
 
     # vespagram matrix
+    print nbeams
+    print ndat
     beams = np.zeros((nbeams, ndat), dtype='f8')
     
     # initialize variabes
@@ -625,10 +660,10 @@ def vespagram_baz(stream, sll, slm, sls, baz, stime, etime, source_depth, distan
                 ####!!!!! FIX THIS IN MERGE VERSION !!!!#####
                 # original implementation
                 s = spoint[i] + int(time_shift_table[i, x]*fs + 0.5)
-                shifted = stream[i].data[s: s + ndat]
+                #shifted = stream[i].data[s: s + ndat]
                 
                 # our implementation
-                #shifted = stream[i].data[starting_point : ending_point]
+                shifted = stream[i].data[starting_point : ending_point]
                 #print(shifted)
                 
                 singlet += 1. / nstat * np.sum(shifted * shifted)
@@ -726,42 +761,36 @@ def get_timeshift_baz(geometry, sll, slm, sls, baze, source_depth, distance, pha
     nstat = len(geometry)  # last index are center coordinates
     baz = math.pi * baze / 180. # BAZ converted from degrees to radiants
     nbeams = int((slm - sll) / sls + 0.5) + 1
-
-    # check the correct values
-    # print(slm*KM_PER_DEG)
-    # print(sll*KM_PER_DEG)
-    # print(nbeams)
-
+    
     # time shift table is given by the number of staions and number of beam traces
     time_shift_tbl = np.empty((nstat, nbeams), dtype="float32")
 
     arrivals = model.get_travel_times(source_depth, distance, phase_list = phase)
     inc_ang = arrivals[0].incident_angle
     inc_ang_rad = inc_ang * np.pi/180
-
+	
     for k in xrange(nbeams):
         sx = sll + k * sls
-        #print(sx)
         if vel_cor*sx < 1.:
             # print("Im in velocity correction - timeshift!!!")
             inc = np.arcsin(vel_cor*sx)
         else:
             inc = np.pi/2.
 		
-        if static_correction:
-            time_shift_tbl[:, k] = - sx * (geometry[:, 0] * math.sin(baz) + geometry[:, 1] * math.cos(baz))  \
-                                   + sx * geometry[:, 2]/1000 * 1./np.tan(inc_ang_rad)
+        #if static_correction:
+            #time_shift_tbl[:, k] = - sx * (geometry[:, 0] * math.sin(baz) + geometry[:, 1] * math.cos(baz))  \
+            #                       + sx * geometry[:, 2]/1000 * 1./np.tan(inc_ang_rad)
             # print(1./np.tan(inc_ang_rad))
             # print(time_shift_tbl)
 
-        else:
+        #else:
             # time shift table matrix    
-            time_shift_tbl[:, k] = - sx * (geometry[:, 0] * math.sin(baz) + geometry[:, 1] * math.cos(baz))	
+        time_shift_tbl[:, k] = - sx * (geometry[:, 0] * math.sin(baz) + geometry[:, 1] * math.cos(baz))	
 						
             # print(time_shift_tbl)
 
-            if static_3D:
-	            time_shift_tbl[:, k] += geometry[:, 2] * np.cos(inc) / vel_cor
+        if static_3D:
+	        time_shift_tbl[:, k] += geometry[:, 2] * np.cos(inc) / vel_cor
     
     return time_shift_tbl
 
@@ -1108,7 +1137,7 @@ def shifttrace_freq(stream, t_shift):
             tr1 = np.fft.irfft(tr1, nfft)
             tr.data = tr1[0:ndat]
 
-def attach_coordinates_to_traces(stream, inventory, event=None):
+def attach_coordinates_to_traces(stream, inventory, isev, isinv, event=None):
     """
     Function to add coordinates to traces.
 
@@ -2461,3 +2490,5 @@ def rotate_seismograms(stream,ev,inv):
     sz.rotate('NE->RT')
 
     return sz
+
+
